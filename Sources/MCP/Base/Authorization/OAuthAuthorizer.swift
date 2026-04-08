@@ -441,8 +441,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             candidates.append(fallback)
         }
 
+        let fallbackIssuer = try? discoveryClient.metadataDiscovery
+            .authorizationServerFallbackIssuer(from: endpoint)
         let metadata = try await discoveryClient.fetchProtectedResourceMetadata(
-            candidates: candidates, session: session)
+            candidates: candidates, fallbackIssuer: fallbackIssuer, session: session)
         try validateProtectedResource(metadata: metadata, endpoint: endpoint)
 
         self.protectedResourceMetadata = metadata
