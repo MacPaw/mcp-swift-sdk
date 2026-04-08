@@ -7,7 +7,7 @@ import Foundation
 /// Internal protocol for fetching OAuth discovery metadata.
 protocol OAuthDiscoveryFetching: Sendable {
     var metadataDiscovery: any OAuthMetadataDiscovering { get }
-    func fetchProtectedResourceMetadata(candidates: [URL], session: URLSession) async throws -> OAuthProtectedResourceMetadata
+    func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata
     func fetchAuthorizationServerMetadata(candidates: [URL], session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
 }
 
@@ -29,8 +29,13 @@ struct OAuthDiscoveryClient: Sendable {
     }
 
     /// Fetches Protected Resource Metadata from the first candidate that returns a valid response.
+    ///
+    /// If all candidates fail and `fallbackIssuer` is provided, returns synthetic metadata
+    /// using that issuer as the authorization server — for servers that do not expose a
+    /// PRM document at any well-known path.
     func fetchProtectedResourceMetadata(
         candidates: [URL],
+        fallbackIssuer: URL?,
         session: URLSession
     ) async throws -> OAuthProtectedResourceMetadata {
         let decoder = JSONDecoder()
@@ -56,15 +61,28 @@ struct OAuthDiscoveryClient: Sendable {
                 continue
             }
         }
+        if let fallbackIssuer {
+            return OAuthProtectedResourceMetadata(
+                resource: nil,
+                authorizationServers: [fallbackIssuer],
+                scopesSupported: nil
+            )
+        }
         throw OAuthAuthorizationError.metadataDiscoveryFailed
     }
 
-    /// Fetches Authorization Server Metadata from the first candidate that returns a valid response.
+    /// Fetches Authorization Server Metadata from candidates, preferring a response whose
+    /// `issuer` matches the candidate URL (RFC 8414 §3). If no candidate produces a matching
+    /// issuer, the first valid response is accepted and its own `issuer` is used as the
+    /// server identity — accommodating servers that serve metadata at one host but advertise
+    /// a different issuer.
     func fetchAuthorizationServerMetadata(
         candidates: [URL],
         session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         let decoder = JSONDecoder()
+        var firstValid: (server: URL, metadata: OAuthAuthorizationServerMetadata)?
+
         for candidateServer in candidates {
             guard (try? urlValidator.validateAuthorizationServer(
                 candidateServer, context: "Authorization server issuer")) != nil
@@ -95,21 +113,27 @@ struct OAuthDiscoveryClient: Sendable {
                     let asMetadata = try decoder.decode(
                         OAuthAuthorizationServerMetadata.self, from: data)
 
-                    // RFC 8414 §3: issuer field must match the candidate server URL.
-                    // Absent issuer is tolerated (some servers omit it).
-                    if let metadataIssuer = asMetadata.issuer {
-                        guard metadataIssuer.absoluteString.lowercased()
+                    // Prefer metadata whose issuer matches the candidate URL (RFC 8414 §3).
+                    let issuerMatches =
+                        asMetadata.issuer == nil
+                        || asMetadata.issuer?.absoluteString.lowercased()
                             == candidateServer.absoluteString.lowercased()
-                        else {
-                            continue
-                        }
+                    if issuerMatches {
+                        return (server: candidateServer, metadata: asMetadata)
                     }
-
-                    return (server: candidateServer, metadata: asMetadata)
+                    // Keep as fallback in case no issuer-matching candidate is found.
+                    if firstValid == nil {
+                        let server = asMetadata.issuer ?? candidateServer
+                        firstValid = (server: server, metadata: asMetadata)
+                    }
                 } catch {
                     continue
                 }
             }
+        }
+
+        if let firstValid {
+            return firstValid
         }
         throw OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
     }

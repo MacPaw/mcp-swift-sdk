@@ -113,7 +113,7 @@ struct OAuthTokenErrorResponse: Decodable {
 ///
 /// Stored by ``TokenStorage`` and produced by ``OAuthAuthorizer`` after a successful
 /// token request. Use ``isExpired(now:skewSeconds:)`` to check validity before use.
-public struct OAuthAccessToken: Sendable {
+public struct OAuthAccessToken: Sendable, Codable {
     /// The raw bearer token string for use in the `Authorization` header.
     public let value: String
 
