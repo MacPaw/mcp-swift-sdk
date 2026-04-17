@@ -137,9 +137,10 @@ public struct OAuthAccessToken: Sendable, Codable {
 
     /// The OAuth `client_id` this token was issued to, if the authorizer had one at storage time.
     ///
-    /// Populated from ``OAuthConfiguration/TokenEndpointAuthentication/clientID`` — including
-    /// identifiers assigned by Dynamic Client Registration (RFC 7591). `nil` when the authorizer
-    /// was configured without a `client_id` (e.g., the placeholder used before registration).
+    /// Captures the `client_id` held by the authorizer's ``OAuthConfiguration/authentication`` when
+    /// the token was saved — including identifiers assigned by Dynamic Client Registration
+    /// (RFC 7591). `nil` when no `client_id` was configured (for example, the placeholder used
+    /// before registration completes).
     public let clientID: String?
 
     /// Creates a new access token record.
