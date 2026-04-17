@@ -217,7 +217,6 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             return nil
         }
         if accessToken.isExpired() {
-            tokenStorage.clear()
             return nil
         }
         return "\(OAuthTokenType.bearer) \(accessToken.value)"
@@ -367,7 +366,6 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
         guard configuration.proactiveRefreshWindowSeconds > 0 else { return }
         guard let token = tokenStorage.load() else { return }
-        guard !token.isExpired() else { return }
         guard token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds) else {
             return
         }
@@ -718,8 +716,15 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             expiresAt: expiresAt,
             scopes: scopeSet,
             authorizationServer: selectedAuthorizationServer,
-            refreshToken: decoded.refreshToken
+            refreshToken: decoded.refreshToken,
+            clientID: nonEmptyClientID()
         ))
+    }
+
+    /// Returns the configured `client_id` or `nil` if the authorizer has not yet been assigned one.
+    private func nonEmptyClientID() -> String? {
+        let id = configuration.authentication.clientID
+        return id.isEmpty ? nil : id
     }
 
     private func resolveTokenEndpoint(
@@ -825,7 +830,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             expiresAt: nil,
             scopes: requestedScopes ?? [],
             authorizationServer: authorizationServer,
-            refreshToken: nil
+            refreshToken: nil,
+            clientID: nonEmptyClientID()
         ))
     }
 

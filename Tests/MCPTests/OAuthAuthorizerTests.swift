@@ -64,7 +64,7 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
         )
     }
 
-    func fetchProtectedResourceMetadata(candidates: [URL], session: URLSession) async throws -> OAuthProtectedResourceMetadata {
+    func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata {
         fetchProtectedResourceMetadataCallCount += 1
         return protectedResourceMetadataResult
     }
@@ -100,6 +100,10 @@ final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
 
 final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
     var registerCallCount = 0
+    var registrationResult: (
+        response: OAuthClientRegistrationResponse,
+        updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
+    )?
 
     func register(
         configuration: OAuthConfiguration,
@@ -110,7 +114,7 @@ final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     )? {
         registerCallCount += 1
-        return nil
+        return registrationResult
     }
 }
 
@@ -380,5 +384,46 @@ struct OAuthAuthorizerTests {
         )
 
         #expect(registrar.registerCallCount == 0)
+    }
+
+    @Test("handleChallenge persists the DCR-assigned clientID on the saved token")
+    func testHandleChallengePersistsDCRClientIDOnToken() async throws {
+        let assignedClientID = "dcr-assigned-client-id"
+        let tokenStorage = InMemoryTokenStorage()
+        let registrar = MockClientRegistrar()
+        registrar.registrationResult = (
+            response: OAuthClientRegistrationResponse(
+                clientID: assignedClientID,
+                clientSecret: nil,
+                tokenEndpointAuthMethod: nil,
+                clientSecretExpiresAt: nil
+            ),
+            updatedAuthentication: .none(clientID: assignedClientID)
+        )
+
+        let config = OAuthConfiguration(
+            authentication: .none(clientID: "")
+        )
+        let authorizer = OAuthAuthorizer(
+            configuration: config,
+            tokenStorage: tokenStorage,
+            urlValidator: MockURLValidator(),
+            discoveryClient: MockDiscoveryClient(),
+            tokenEndpointClient: MockTokenClient(),
+            clientRegistrar: registrar,
+            authCodeFlow: MockAuthCodeFlow()
+        )
+
+        let handled = try await authorizer.handleChallenge(
+            statusCode: 401,
+            headers: headers401,
+            endpoint: endpoint,
+            operationKey: nil,
+            session: .shared
+        )
+
+        #expect(handled == true)
+        #expect(registrar.registerCallCount == 1)
+        #expect(tokenStorage.load()?.clientID == assignedClientID)
     }
 }
