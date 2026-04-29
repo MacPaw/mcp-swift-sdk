@@ -214,7 +214,7 @@ struct SSEEvent: Sendable {
 ///
 /// The server consults this during dispatch so that registered method handlers can
 /// observe the HTTP request that triggered them (headers, auth, path, body) via
-/// ``Server/currentHTTPContext``, without changing the `withMethodHandler` signature.
+/// ``Server/currentHandlerContext``, without changing the `withMethodHandler` signature.
 ///
 /// Only JSON-RPC *requests* (with an id) are addressable — notifications have no id and
 /// are not correlated.
