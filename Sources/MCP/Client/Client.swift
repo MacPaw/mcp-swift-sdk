@@ -178,6 +178,10 @@ public actor Client {
     private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    /// Tasks that run the handlers of server-to-client requests, keyed by request ID
+    private var incomingRequestTasks: [ID: IncomingRequestTask] = [:]
+    /// The token of the next incoming request task
+    private var nextIncomingRequestToken: UInt64 = 0
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -230,7 +234,10 @@ public actor Client {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            await handleIncomingRequest(request)
+                            // A handler can wait for a long time (for example, for the user
+                            // to answer an elicitation). Run it in a separate task, as Server
+                            // does, so that the loop continues to read the responses of other requests.
+                            await startIncomingRequest(request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             await handleMessage(message)
                         } else {
@@ -277,6 +284,11 @@ public actor Client {
             {
                 pendingRequest.resume(throwing: CancellationError())
             }
+
+            // Cancel the handler of a server-to-client request with this ID
+            if let requestId = requestId {
+                await self.cancelIncomingRequest(id: requestId)
+            }
         }
 
         // Automatically initialize after connecting
@@ -291,10 +303,12 @@ public actor Client {
         let taskToCancel = self.task
         let connectionToDisconnect = self.connection
         let pendingRequestsToCancel = self.pendingRequests
+        let incomingRequestTasksToCancel = self.incomingRequestTasks
 
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
+        self.incomingRequestTasks = [:]
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -303,6 +317,11 @@ public actor Client {
             request.resume(throwing: MCPError.internalError("Client disconnected"))
         }
         await logger?.debug("Pending requests cancelled.")
+
+        // Cancel the handlers of server-to-client requests. Their responses have no connection to go to.
+        for (_, incomingRequestTask) in incomingRequestTasksToCancel {
+            incomingRequestTask.task.cancel()
+        }
 
         // Cancel the task
         taskToCancel?.cancel()
@@ -344,6 +363,9 @@ public actor Client {
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
         methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
+            // The server can cancel the request before the handler starts. This check runs
+            // after the hop off the actor, so a cancel that arrived during the hop also counts.
+            try Task.checkCancellation()
             let result = try await handler(request.params)
             return Response(id: request.id, result: result)
         }
@@ -1007,6 +1029,47 @@ public actor Client {
         }
     }
 
+    /// A running handler of a server-to-client request.
+    private struct IncomingRequestTask {
+        /// Identifies the task, because a later request can use the same ID
+        let token: UInt64
+        let task: Task<Void, Never>
+    }
+
+    private func startIncomingRequest(_ request: Request<AnyMethod>) async {
+        let id = request.id
+        guard incomingRequestTasks[id] == nil else {
+            // The ID of a request must be unique while the request runs. A response
+            // with this ID would also answer the running request, so send none.
+            await logger?.warning(
+                "Ignoring a server request with an ID that is already in use",
+                metadata: ["method": "\(request.method)", "id": "\(id)"])
+            return
+        }
+
+        let token = nextIncomingRequestToken
+        nextIncomingRequestToken &+= 1
+        // The task inherits the actor isolation. Nothing suspends between the creation
+        // of the task and the insert, so the entry exists before the task removes it.
+        let task = Task {
+            await self.handleIncomingRequest(request)
+            self.removeIncomingRequestTask(id: id, token: token)
+        }
+        incomingRequestTasks[id] = IncomingRequestTask(token: token, task: task)
+    }
+
+    /// Removes the entry only if it still holds the task with this token.
+    /// After disconnect and connect, the entry can hold the task of a new request with the same ID.
+    private func removeIncomingRequestTask(id: ID, token: UInt64) {
+        if incomingRequestTasks[id]?.token == token {
+            incomingRequestTasks[id] = nil
+        }
+    }
+
+    private func cancelIncomingRequest(id: ID) {
+        incomingRequestTasks.removeValue(forKey: id)?.task.cancel()
+    }
+
     private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
         await logger?.trace(
             "Processing incoming request from server",
@@ -1018,6 +1081,8 @@ public actor Client {
                 metadata: ["method": "\(request.method)"])
             let error = MCPError.methodNotFound("Unknown method: \(request.method)")
             let response = AnyMethod.response(id: request.id, error: error)
+            // A cancelled request gets no response, also when no handler exists.
+            guard !Task.isCancelled else { return }
             do {
                 try await send(response)
             } catch {
@@ -1028,10 +1093,13 @@ public actor Client {
             return
         }
 
+        // A cancelled request gets no response: the server cancelled it, or the client disconnected.
         do {
             let response = try await handler(request)
+            guard !Task.isCancelled else { return }
             try await send(response)
         } catch {
+            guard !Task.isCancelled else { return }
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             do {
