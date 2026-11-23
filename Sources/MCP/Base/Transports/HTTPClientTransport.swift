@@ -415,11 +415,11 @@ public actor HTTPClientTransport: Transport {
         case 408:
             throw MCPError.internalError("Request timeout")
 
-        case 429:
-            throw MCPError.internalError("Too many requests")
-
-        case 500..<600:
-            throw MCPError.internalError("Server error: \(response.statusCode)")
+        case 429, 500..<600:
+            throw HTTPStatusError(
+                statusCode: response.statusCode,
+                retryAfter: HTTPStatusError.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+            )
 
         default:
             throw MCPError.internalError(
