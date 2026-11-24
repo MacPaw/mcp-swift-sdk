@@ -335,18 +335,29 @@ import Testing
             }
         }
 
-        @Test("HTTP 500 Server Error", .httpClientTransportSetup)
-        func testHTTPServerError() async throws {
+        @Test(
+            "HTTP 429 and 5xx throw their status and Retry-After",
+            .httpClientTransportSetup,
+            arguments: [
+                (429, "7", 7.0 as TimeInterval?, "Internal error: Too many requests"),
+                (500, nil, nil, "Internal error: Server error: 500"),
+                (503, "120", 120.0, "Internal error: Server error: 503"),
+                (503, "soon", nil, "Internal error: Server error: 503"),
+            ] as [(Int, String?, TimeInterval?, String)]
+        )
+        func testHTTPStatusError(
+            status: Int, retryAfterHeader: String?, retryAfter: TimeInterval?, description: String
+        ) async throws {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let messageData = #"{"jsonrpc":"2.0","method":"test","id":4}"#.data(using: .utf8)!
 
-            // Set up the handler BEFORE creating the transport
             await MockURLProtocol.requestHandlerStorage.setHandler {
                 [testEndpoint] (request: URLRequest) in
                 let response = HTTPURLResponse(
-                    url: testEndpoint, statusCode: 500, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    url: testEndpoint, statusCode: status, httpVersion: "HTTP/1.1",
+                    headerFields: retryAfterHeader.map { ["Retry-After": $0] })!
                 return (response, Data("Server Error".utf8))
             }
 
@@ -360,17 +371,24 @@ import Testing
 
             do {
                 try await transport.send(messageData)
-                Issue.record("Expected send to throw an error for 500")
-            } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
-                    throw error
-                }
-                #expect(message?.contains("Server error: 500") ?? false)
+                Issue.record("Expected send to throw an error for \(status)")
+            } catch let error as HTTPStatusError {
+                #expect(error.statusCode == status)
+                #expect(error.retryAfter == retryAfter)
+                #expect(error.localizedDescription == description)
             } catch {
-                Issue.record("Expected MCPError, got \(error)")
+                Issue.record("Expected HTTPStatusError, got \(error)")
                 throw error
             }
+        }
+
+        @Test("Retry-After as an HTTP date is the time until it")
+        func testRetryAfterHTTPDate() {
+            let now = Date(timeIntervalSince1970: 1_445_412_480)  // Wed, 21 Oct 2015 07:28:00 GMT
+            #expect(HTTPStatusError.retryAfter("Wed, 21 Oct 2015 07:28:30 GMT", now: now) == 30)
+            #expect(HTTPStatusError.retryAfter("Wed, 21 Oct 2015 07:27:00 GMT", now: now) == 0)
+            #expect(HTTPStatusError.retryAfter("-5", now: now) == nil)
+            #expect(HTTPStatusError.retryAfter(nil, now: now) == nil)
         }
 
         @Test("HTTP 400 Bad Request Error", .httpClientTransportSetup)
